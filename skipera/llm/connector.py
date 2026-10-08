@@ -1,7 +1,8 @@
 import json
 import httpx
 from ..config import (PERPLEXITY_API_URL, PERPLEXITY_API_KEY,
-                      PERPLEXITY_MODEL, GEMINI_API_KEY, GEMINI_MODEL)
+                      PERPLEXITY_MODEL, GEMINI_API_KEY, GEMINI_MODEL,
+                      GROQ_API_URL, GROQ_API_KEY, GROQ_MODEL)
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
@@ -54,12 +55,51 @@ class PerplexityConnector(object):
 
         response = httpx.post(url=self.API_URL, headers={
             "Authorization": f"Bearer {self.API_KEY}"
-        }, json=payload, timeout=60.0).json()
+        }, json=payload, timeout=60.0, verify=False).json()
 
         content = response["choices"][0]["message"]["content"]
         if response_schema is not None:
             return json.loads(content)
         return content.strip()
+
+
+class GroqConnector(object):
+    def __init__(self, api_key: str | None = None):
+        self.API_URL: str = GROQ_API_URL
+        # Use provided api_key or fallback to config/default
+        self.API_KEY: str = api_key if api_key is not None else GROQ_API_KEY
+
+    def get_response(
+            self,
+            prompt: dict | str,
+            system_prompt: str,
+            response_schema: dict[str, Any] | None = None
+    ) -> dict | str:
+        """
+        Sends a prompt to Groq and optionally asks for a JSON schema response.
+        """
+        logger.debug("Making an API Request to Groq..")
+        payload = {
+            "model": GROQ_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(
+                    prompt) if isinstance(prompt, dict) else prompt},
+            ],
+        }
+        if response_schema is not None:
+            payload["response_format"] = {"type": "json_object"}
+            payload["messages"][0]["content"] += f"\n\nYou MUST return a JSON object that adheres to the following JSON schema:\n{json.dumps(response_schema)}"
+
+        response = httpx.post(url=self.API_URL, headers={
+            "Authorization": f"Bearer {self.API_KEY}"
+        }, json=payload, timeout=60.0, verify=False).json()
+
+        content = response["choices"][0]["message"]["content"]
+        if response_schema is not None:
+            return json.loads(content)
+        return content.strip()
+
 
 
 class GeminiConnector(object):
@@ -100,3 +140,42 @@ class GeminiConnector(object):
         if response_schema is not None:
             return json.loads(raw_text)
         return raw_text.strip()
+
+
+def test_llm_setup() -> None:
+    from .. import config
+    if config.PERPLEXITY_API_KEY:
+        logger.info("Using Perplexity for LLM.")
+        return
+    if config.GEMINI_API_KEY:
+        logger.info("Using Gemini for LLM.")
+        return
+    
+    # Otherwise check Groq
+    groq_keys = getattr(config, "GROQ_API_KEYS", [])
+    if not groq_keys and config.GROQ_API_KEY:
+        groq_keys = [config.GROQ_API_KEY]
+        
+    if not groq_keys:
+        logger.error("No LLM API Key specified! Please add a Gemini, Perplexity, or Groq API key.")
+        raise SystemExit(1)
+        
+    logger.info(f"Testing {len(groq_keys)} Groq API keys to ensure at least one is working...")
+    working_key_found = False
+    for key in groq_keys:
+        try:
+            conn = GroqConnector(api_key=key)
+            conn.get_response("hello", system_prompt="reply with hi")
+            working_key_found = True
+            logger.success(f"Groq API key {key[:5]}... is working!")
+            break 
+        except Exception as e:
+            logger.debug(f"Groq API key {key[:5]}... failed test: {e}")
+            
+    if not working_key_found:
+        logger.error("All provided Groq API keys failed (likely rate-limited or invalid). Please try again later or provide a new key.")
+        raise SystemExit(1)
+        
+    # We do NOT overwrite config.GROQ_API_KEYS here.
+    # This allows solver.py to rotate through all keys (in case one hits a rate limit later).
+

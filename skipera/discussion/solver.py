@@ -5,7 +5,7 @@ import httpx
 from loguru import logger
 
 from .. import config
-from ..llm.connector import GeminiConnector, PerplexityConnector
+from ..llm.connector import GeminiConnector, PerplexityConnector, GroqConnector, GroqConnector
 from ..session_utils import get_csrf_headers, random_delay
 
 
@@ -67,11 +67,13 @@ class DiscussionPromptSolver(object):
             logger.error("Could not submit discussion answer.")
             return False
 
-    def get_connector(self) -> PerplexityConnector | GeminiConnector:
+    def get_connector(self) -> PerplexityConnector | GeminiConnector | GroqConnector:
         if config.PERPLEXITY_API_KEY:
             return PerplexityConnector()
         if config.GEMINI_API_KEY:
             return GeminiConnector()
+        if config.GROQ_API_KEY:
+            return GroqConnector()
         raise RuntimeError("No API Key specified.")
 
     def get_prompt(self) -> dict | None:

@@ -16,7 +16,7 @@ class Skipera(object):
         self.user_id = None
         self.course_id = None
         self.base_url = BASE_URL
-        self.session = httpx.Client(timeout=60.0, follow_redirects=True)
+        self.session = httpx.Client(timeout=60.0, follow_redirects=True, verify=False)
         self.session.headers.update(HEADERS)
         self.session.cookies.update(COOKIES)
         self.course = course
@@ -28,6 +28,11 @@ class Skipera(object):
                 logger.error(
                     "Cookies are invalid. Log into Coursera in your browser, close it, and retry.")
                 raise SystemExit
+        
+        if self.llm:
+            from .llm.connector import test_llm_setup
+            test_llm_setup()
+
 
     def refresh_cookies(self):
         logger.warning("Session expired — re-fetching cookies from browser...")

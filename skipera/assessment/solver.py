@@ -11,7 +11,7 @@ from ..config import GRAPHQL_URL, CONFIG_DIR
 from .queries import (GET_STATE_QUERY, SAVE_RESPONSES_QUERY, SUBMIT_DRAFT_QUERY,
                       INITIATE_ATTEMPT_QUERY, ASSIGNMENT_FEEDBACK_QUERY)
 from loguru import logger
-from ..llm.connector import DEFAULT_RESPONSE_SCHEMA, PerplexityConnector, GeminiConnector
+from ..llm.connector import DEFAULT_RESPONSE_SCHEMA, PerplexityConnector, GeminiConnector, GroqConnector
 from ..session_utils import get_csrf_headers, random_delay
 
 
@@ -23,8 +23,8 @@ SYSTEM_PROMPT = (
     "- 'Type': one of 'MULTIPLE_CHOICE', 'CHECKBOX', or 'TEXT_REFLECT'.\n"
     "- 'previous_attempts': (optional, only for CHECKBOX) past attempt results.\n\n"
     "Rules for each question type:\n"
-    "1. MULTIPLE_CHOICE: Single-choice question. Select exactly one option_id and place it in the 'chosen' list.\n"
-    "2. CHECKBOX: Multi-choice question. Select one or more option_ids and place them in the 'chosen' list.\n"
+    "1. MULTIPLE_CHOICE: Single-choice question. Select exactly one option_id and place it in the 'chosen' list. (CRITICAL: You MUST use the exact 'option_id' hash string, do NOT use indices like '1' or '2'!).\n"
+    "2. CHECKBOX: Multi-choice question. Select one or more option_ids and place them in the 'chosen' list. (CRITICAL: You MUST use the exact 'option_id' hash strings!).\n"
     "3. TEXT_REFLECT: Question with no options. Answer the question prompt thoughtfully and precisely "
     "matching the question content. The response in the 'answer' field must be a high-quality, relevant response directly answering the prompt.\n\n"
     "IMPORTANT for CHECKBOX:\n"
@@ -79,6 +79,9 @@ class GradedSolver(object):
 
     def _format_response(self, part_id: str, q_type: str, chosen: list = None, answer: str = None) -> dict:
         response_key, val_key = TYPE_LOOKUP[q_type]
+        if chosen and isinstance(chosen, str):
+            chosen = [chosen]
+            
         if q_type == "MULTIPLE_CHOICE":
             val = chosen[0] if chosen else None
         elif q_type == "CHECKBOX":
@@ -238,22 +241,46 @@ class GradedSolver(object):
                             unsolved_questions[part_id]["previous_attempts"] = virtual_feedbacks
 
             if unsolved_questions:
+                llm_result = None
                 if config.PERPLEXITY_API_KEY:
                     connector = PerplexityConnector()
                 elif config.GEMINI_API_KEY:
                     connector = GeminiConnector()
+                elif getattr(config, "GROQ_API_KEYS", []):
+                    # Try each Groq API key until one works
+                    for key in config.GROQ_API_KEYS:
+                        connector = GroqConnector(api_key=key)
+                        try:
+                            llm_result = connector.get_response(
+                                unsolved_questions,
+                                system_prompt=SYSTEM_PROMPT,
+                                response_schema=DEFAULT_RESPONSE_SCHEMA,
+                            )
+                            break  # success
+                        except Exception as e:
+                            logger.warning(f"Groq key failed ({key[:4]}...): {e}")
+                    else:
+                        raise RuntimeError("All Groq API keys exhausted.")
+                elif config.GROQ_API_KEY:
+                    connector = GroqConnector()
                 else:
                     raise RuntimeError("No API Key specified.")
-
-                llm_result = connector.get_response(
-                    unsolved_questions, system_prompt=SYSTEM_PROMPT, response_schema=DEFAULT_RESPONSE_SCHEMA)
+                # If we haven't obtained llm_result yet (i.e., using Perplexity or Gemini), fetch it now
+                if llm_result is None:
+                    llm_result = connector.get_response(
+                        unsolved_questions,
+                        system_prompt=SYSTEM_PROMPT,
+                        response_schema=DEFAULT_RESPONSE_SCHEMA,
+                    )
                 for ans in llm_result.get("responses", []):
-                    answer_responses.append(self._format_response(
-                        part_id=ans["question_id"],
-                        q_type=unsolved_questions[ans["question_id"]]["Type"], # Don't trust the LLM to echo back question_type
-                        chosen=ans.get("chosen"),
-                        answer=ans.get("answer")
-                    ))
+                    answer_responses.append(
+                        self._format_response(
+                            part_id=ans["question_id"],
+                            q_type=unsolved_questions[ans["question_id"]]["Type"],
+                            chosen=ans.get("chosen"),
+                            answer=ans.get("answer"),
+                        )
+                    )
             else:
                 logger.info(
                     "All questions already correct — resubmitting same answers.")
