@@ -277,11 +277,99 @@ class Skipera(object):
         return 200 <= r.status_code < 300
 
 
+def list_enrolled_courses() -> None:
+    from .config import fetch_browser_cookies, HEADERS
+    import httpx
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    logger.info("Fetching enrolled courses...")
+    cookies = fetch_browser_cookies()
+    if not cookies:
+        logger.error("Could not fetch cookies. Please log in to Coursera.")
+        return
+        
+    client = httpx.Client(cookies=cookies, headers=HEADERS, follow_redirects=True, verify=False)
+    url = "https://www.coursera.org/api/memberships.v1?includes=courseId,courses.v1&q=me&showHidden=true&filter=current"
+    r = client.get(url)
+    
+    if r.status_code != 200:
+        logger.error(f"Failed to fetch courses: {r.status_code}")
+        return
+        
+    data = r.json()
+    courses = data.get("linked", {}).get("courses.v1", [])
+    elements = data.get("elements", [])
+    user_id = elements[0].get("userId") if elements else None
+    
+    if not courses or not user_id:
+        logger.info("No enrolled courses found.")
+        return
+        
+    def fetch_course_progress(c: dict) -> dict:
+        course_id = c.get("id")
+        slug = c.get("slug")
+        name = c.get("name")
+        
+        # Get completed items
+        prog_url = f"https://www.coursera.org/api/onDemandCoursesProgress.v1/{user_id}~{course_id}"
+        pr = client.get(prog_url)
+        completed = 0
+        if pr.status_code == 200:
+            pelements = pr.json().get("elements", [])
+            if pelements:
+                items = pelements[0].get("items", {})
+                completed = sum(1 for item in items.values() if item.get("progressState") == "Completed")
+                
+        # Get total items
+        mat_url = f"https://www.coursera.org/api/onDemandCourseMaterials.v2/?q=slug&slug={slug}&includes=items"
+        mr = client.get(mat_url)
+        total = "?"
+        if mr.status_code == 200:
+            total = len(mr.json().get("linked", {}).get("onDemandCourseMaterialItems.v2", []))
+            
+        return {
+            "name": name,
+            "slug": slug,
+            "completed": completed,
+            "total": total
+        }
+
+    logger.info(f"Calculating progress for {len(courses)} courses (this may take a few seconds)...")
+    results = []
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(fetch_course_progress, c): c for c in courses}
+        for future in as_completed(futures):
+            results.append(future.result())
+            
+    print("\n" + "="*60)
+    print(" ENROLLED COURSES ".center(60, "="))
+    print("="*60)
+    
+    for res in results:
+        percentage = f"{(res['completed'] / int(res['total']) * 100):.1f}%" if str(res['total']).isdigit() and res['total'] > 0 else "N/A"
+        print(f"Title    : {res['name']}")
+        print(f"Slug     : {res['slug']}")
+        print(f"Progress : {res['completed']} / {res['total']} completed ({percentage})")
+        print(f"Command  : python -m skipera.main {res['slug']} --llm")
+        print("-" * 60)
+    print("\n")
+
+
 @logger.catch
 @click.command()
-@click.argument('slug')
+@click.argument('slug', required=False)
 @click.option('--llm', is_flag=True, help="Whether to use an LLM to solve graded assignments.")
-def main(slug: str, llm: bool) -> None:
+@click.option('--list', 'list_courses_flag', is_flag=True, help="List enrolled courses and their slugs.")
+def main(slug: str | None, llm: bool, list_courses_flag: bool) -> None:
+    if list_courses_flag:
+        list_enrolled_courses()
+        return
+        
+    if not slug:
+        import sys
+        logger.error("Missing argument 'SLUG'.")
+        sys.exit(1)
+        
     skipera = Skipera(slug, llm)
     skipera.get_course()
 
